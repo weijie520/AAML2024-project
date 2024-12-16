@@ -1,6 +1,6 @@
 module Cfu (
     input               cmd_valid,
-    output           cmd_ready,
+    output reg          cmd_ready,
     input      [9:0]    cmd_payload_function_id,
     input      [31:0]   cmd_payload_inputs_0,
     input      [31:0]   cmd_payload_inputs_1,
@@ -11,41 +11,72 @@ module Cfu (
     input               clk
 );
 
-    // reg [8:0] InputOffset = $signed(9'd128), FilterOffset = $signed(9'd0);
-    localparam InputOffset = $signed(9'd128);
+  reg [6:0] func;
+  reg [4:0] state;
 
-    // SIMD multiply step:
-    wire signed [15:0] prod_0, prod_1, prod_2, prod_3;
-    // wire signed [8:0] cur_offset;
-
-    // assign cur_offset = |cmd_payload_inputs_0[31:8]?InputOffset:FilterOffset;
-
-    assign prod_0 = ($signed(cmd_payload_inputs_0[7 : 0]) + InputOffset)
-                  * $signed(cmd_payload_inputs_1[7 : 0]);
-    assign prod_1 = ($signed(cmd_payload_inputs_0[15 : 8]) + InputOffset)
-                  * $signed(cmd_payload_inputs_1[15 : 8]);
-    assign prod_2 = ($signed(cmd_payload_inputs_0[23 : 16]) + InputOffset)
-                  * $signed(cmd_payload_inputs_1[23 : 16]);
-    assign prod_3 = ($signed(cmd_payload_inputs_0[31 : 24]) + InputOffset)
-                  * $signed(cmd_payload_inputs_1[31 : 24]);
-
-    wire signed [31:0] sum_prods;
-    assign sum_prods = prod_0 + prod_1 + prod_2 + prod_3;
-
-    // Only not ready for a command when we have a response.
-    assign cmd_ready = ~rsp_valid;
-
-    always @(posedge clk) begin
-        if (reset) begin
-          rsp_payload_outputs_0 <= 32'b0;
-          rsp_valid <= 1'b0;
-        end else if (rsp_valid) begin
-          rsp_valid <= ~rsp_ready;
-        end else if(cmd_valid) begin
-          rsp_valid <= 1'b1;
-          rsp_payload_outputs_0 <= |cmd_payload_function_id[9:3]
-          ? 32'b0
-          : rsp_payload_outputs_0 + sum_prods;
-        end
+  always @ (posedge clk) begin
+    if(reset) begin
+      rsp_payload_outputs_0 <= 32'd0;
+      rsp_valid <= 1'b0;
+      cmd_ready <= 1'b1;
+      func <= 0;
+      state <= 0;
+    end else if(rsp_valid) begin
+      rsp_valid <= ~rsp_ready;
+      cmd_ready <= rsp_ready;
+    end else if(cmd_valid) begin
+      if(cmd_ready) begin
+        func = cmd_payload_function_id[9:3];
+        case(func)
+          0: begin
+            case(state)
+              0: begin
+                rsp_payload_outputs_0 <= SaturatingRoundingDoublingHighMul(cmd_payload_inputs_0, cmd_payload_inputs_1);
+                rsp_valid <= 1'b1;
+                cmd_ready <= 1'b0;
+                state <= 1;
+              end
+              1: begin
+                rsp_payload_outputs_0 <= cmd_payload_inputs_1 + RoundingDivideByPOT(rsp_payload_outputs_0, cmd_payload_inputs_0);
+                rsp_valid <= 1'b1;
+                cmd_ready <= 1'b0;
+                state <= 0;
+              end
+            endcase
+          end
+        endcase
+      end
     end
+  end
+
+  // Multiply two fixpoint raw values, should be care for the kIntergerBits of result
+  function signed [31:0] SaturatingRoundingDoublingHighMul;
+    input signed [31:0] a, b;
+    reg signed [63:0] result;
+    // reg signed [31:0] nudge;
+    begin
+      result = a * b;
+
+      // Rounding logic based on sign of the result
+      // if (result >= 0)
+      //     nudge = (1 << 30);  // Round up for positive values
+      // else
+      //     nudge = (1 - (1 << 30));  // Round down for negative values
+
+      // Apply the rounding and shift the result to 32 bits
+      // result = (result + nudge) >>> 31;  // Rounding3
+      result = result >>> 31;  // Rounding
+      SaturatingRoundingDoublingHighMul = result[31:0];  // Return lower 32 bits
+    end
+  endfunction
+
+  function signed [31:0] RoundingDivideByPOT;
+    input signed [31:0] x, exponent;
+    reg signed [31:0] mask, remainder, result;
+    begin
+      result = x >>> exponent;
+      RoundingDivideByPOT = result;
+    end
+  endfunction
+
 endmodule

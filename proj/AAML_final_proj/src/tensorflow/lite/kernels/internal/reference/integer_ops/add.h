@@ -16,8 +16,10 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_ADD_H_
 
 #include <algorithm>
+#include <cstdio>
 #include <limits>
 
+#include "cfu.h"
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 
@@ -41,6 +43,15 @@ inline void ElementWise(
     void (*check_arithmetic_params)(const ArithmeticParams&),
     int8_t (*binary_func)(int8_t, int8_t, const ArithmeticParams&)) {
   CheckArithmeticParams(params);
+  // printf("size: %d\n", size);
+  // printf("inpu1_offset: %ld, input2_offset: %ld, output_offset: %ld\n",
+  //        params.input1_offset, params.input2_offset, params.output_offset);
+  // printf("input1_shift: %d, input2_shift: %d, output_shift: %d\n",
+  //        params.input1_shift, params.input2_shift, params.output_shift);
+  // printf(
+  //     "input1_multiplier: %lx, input2_multiplier: %lx, output_multiplier:
+  //     %lx", params.input1_multiplier, params.input2_multiplier,
+  //     params.output_multiplier);
   for (int i = 0; i < size; ++i) {
     output_data[i] = binary_func(input1_data[i], input2_data[i], params);
   }
@@ -89,17 +100,25 @@ inline int8_t AddFunc(int8_t x, int8_t y, const ArithmeticParams& params) {
   const int32_t input2_val = params.input2_offset + y;
   const int32_t shifted_input1_val = input1_val * (1 << params.left_shift);
   const int32_t shifted_input2_val = input2_val * (1 << params.left_shift);
-  const int32_t scaled_input1_val =
-      MultiplyByQuantizedMultiplierSmallerThanOneExp(
-          shifted_input1_val, params.input1_multiplier, params.input1_shift);
-  const int32_t scaled_input2_val =
-      MultiplyByQuantizedMultiplierSmallerThanOneExp(
-          shifted_input2_val, params.input2_multiplier, params.input2_shift);
+  // const int32_t scaled_input1_val =
+  //     MultiplyByQuantizedMultiplierSmallerThanOneExp(
+  //         shifted_input1_val, params.input1_multiplier, params.input1_shift);
+  cfu_op0(0, shifted_input1_val, params.input1_multiplier);
+  const int32_t scaled_input1_val = cfu_op0(0, -params.input1_shift, 0);
+  // const int32_t scaled_input2_val =
+  //     MultiplyByQuantizedMultiplierSmallerThanOneExp(
+  //         shifted_input2_val, params.input2_multiplier, params.input2_shift);
+  cfu_op0(0, shifted_input2_val, params.input2_multiplier);
+  const int32_t scaled_input2_val = cfu_op0(0, -params.input2_shift, 0);
   const int32_t raw_sum = scaled_input1_val + scaled_input2_val;
+  // const int32_t raw_output =
+  //     MultiplyByQuantizedMultiplierSmallerThanOneExp(
+  //         raw_sum, params.output_multiplier, params.output_shift) +
+  //     params.output_offset;
+  cfu_op0(0, raw_sum, params.output_multiplier);
   const int32_t raw_output =
-      MultiplyByQuantizedMultiplierSmallerThanOneExp(
-          raw_sum, params.output_multiplier, params.output_shift) +
-      params.output_offset;
+      cfu_op0(0, -params.output_shift, params.output_offset);
+
   const int32_t clamped_output =
       std::min(params.quantized_activation_max,
                std::max(params.quantized_activation_min, raw_output));
