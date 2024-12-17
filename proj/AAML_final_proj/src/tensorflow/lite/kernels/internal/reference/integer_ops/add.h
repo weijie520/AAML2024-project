@@ -102,22 +102,25 @@ inline int8_t AddFunc(int8_t x, int8_t y, const ArithmeticParams& params) {
   const int32_t shifted_input2_val = input2_val * (1 << params.left_shift);
   // const int32_t scaled_input1_val =
   //     MultiplyByQuantizedMultiplierSmallerThanOneExp(
-  //         shifted_input1_val, params.input1_multiplier, params.input1_shift);
-  cfu_op0(0, shifted_input1_val, params.input1_multiplier);
-  const int32_t scaled_input1_val = cfu_op0(0, -params.input1_shift, 0);
+  //         shifted_input1_val, params.input1_multiplier,
+  //         params.input1_shift);
+  int32_t a = cfu_op0(0, shifted_input1_val, params.input1_multiplier);
+  const int32_t scaled_input1_val = cfu_op0(6, a, -params.input1_shift);
   // const int32_t scaled_input2_val =
   //     MultiplyByQuantizedMultiplierSmallerThanOneExp(
-  //         shifted_input2_val, params.input2_multiplier, params.input2_shift);
-  cfu_op0(0, shifted_input2_val, params.input2_multiplier);
-  const int32_t scaled_input2_val = cfu_op0(0, -params.input2_shift, 0);
+  //         shifted_input2_val, params.input2_multiplier,
+  //         params.input2_shift);
+  int32_t b = cfu_op0(0, shifted_input2_val, params.input2_multiplier);
+  const int32_t scaled_input2_val = cfu_op0(6, b, -params.input2_shift);
+
   const int32_t raw_sum = scaled_input1_val + scaled_input2_val;
   // const int32_t raw_output =
   //     MultiplyByQuantizedMultiplierSmallerThanOneExp(
   //         raw_sum, params.output_multiplier, params.output_shift) +
   //     params.output_offset;
-  cfu_op0(0, raw_sum, params.output_multiplier);
+  int32_t c = cfu_op0(0, raw_sum, params.output_multiplier);
   const int32_t raw_output =
-      cfu_op0(0, -params.output_shift, params.output_offset);
+      cfu_op0(6, c, -params.output_shift) + params.output_offset;
 
   const int32_t clamped_output =
       std::min(params.quantized_activation_max,
