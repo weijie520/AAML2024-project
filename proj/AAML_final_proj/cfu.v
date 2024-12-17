@@ -50,8 +50,6 @@ PATTERN pattern(
   .C_data_out(C_data_out)
 );
 
-
-
 always @ (posedge clk) begin
   if(reset) begin
     rsp_payload_outputs_0 <= 32'd0;

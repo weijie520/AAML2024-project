@@ -16,12 +16,20 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
 
 #include <algorithm>
+#include <cstdio>
 
+#include "cfu.h"
+#include "perf.h"
+#include "playground_util/print_params.h"
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
 
 namespace tflite {
 namespace reference_integer_ops {
+
+int8_t im2col[1024][608];
+int8_t kernels[96][608];
+int32_t results[1024][96];
 
 // Fixed-point per-channel-quantization convolution reference kernel.
 inline void ConvPerChannel(
@@ -32,6 +40,8 @@ inline void ConvPerChannel(
     const int32_t* bias_data, const RuntimeShape& output_shape,
     int8_t* output_data) {
   // Get parameters.
+  print_conv_params(params, input_shape, filter_shape, output_shape);
+
   const int32_t input_offset = params.input_offset;  // r = s(q - Z)
   const int stride_width = params.stride_width;
   const int stride_height = params.stride_height;
@@ -50,7 +60,7 @@ inline void ConvPerChannel(
   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
-  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  // const int batches = MatchingDim(input_shape, 0, output_shape, 0);
   const int input_depth = input_shape.Dims(3);
   const int output_depth = MatchingDim(filter_shape, 0, output_shape, 3);
   if (bias_data) {
@@ -63,73 +73,151 @@ inline void ConvPerChannel(
   const int filter_height = filter_shape.Dims(1);
   const int filter_width = filter_shape.Dims(2);
   const int filter_input_depth = filter_shape.Dims(3);
-  const int groups = input_depth / filter_input_depth;
+  // const int groups = input_depth / filter_input_depth;
   TFLITE_DCHECK_EQ(input_depth % filter_input_depth, 0);
-  const int filters_per_group = output_depth / groups;
+  // const int filters_per_group = output_depth / groups;
   const int output_height = output_shape.Dims(1);
   const int output_width = output_shape.Dims(2);
-  for (int batch = 0; batch < batches; ++batch) {
-    for (int out_y = 0; out_y < output_height; ++out_y) {
-      const int in_y_origin = (out_y * stride_height) - pad_height;
-      for (int out_x = 0; out_x < output_width; ++out_x) {
-        const int in_x_origin = (out_x * stride_width) - pad_width;
-        for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-          auto group = out_channel / filters_per_group;
-          int32_t acc = 0;
-          for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
-            const int in_y = in_y_origin + dilation_height_factor * filter_y;
-            for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
-              const int in_x = in_x_origin + dilation_width_factor * filter_x;
 
-              // Zero padding by omitting the areas outside the image.
-              const bool is_point_inside_image =
-                  (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
-                  (in_y < input_height);
+  // constexpr int max_nop = 1024;  // max number of patches
+  // constexpr int max_kernel_size =
+  //     1024;  // filter_height * filter_width * filter_input_depth
+  // constexpr int max_nok = 1024;  // max number of kernels
+  constexpr int tile_size = 32;
 
-              if (!is_point_inside_image) {
-                continue;
-              }
+  const int num_patch = output_height * output_width;
+  const int kernel_size = filter_width * filter_height * filter_input_depth;
+  const int num_kernel = output_depth;
 
-              for (int in_channel = 0; in_channel < filter_input_depth;
-                   ++in_channel) {
-                int32_t input_val =
-                    input_data[Offset(input_shape, batch, in_y, in_x,
-                                      in_channel + group * filter_input_depth)];
-                int32_t filter_val = filter_data[Offset(
-                    filter_shape, out_channel, filter_y, filter_x, in_channel)];
-                // Accumulate with 32 bits accumulator.
-                // In the nudging process during model quantization, we force
-                // real value of 0.0 be represented by a quantized value. This
-                // guarantees that the input_offset is a int8_t, even though
-                // it is represented using int32_t. int32_t += int8_t *
-                // (int8_t - int8_t) so the highest value we can get from each
-                // accumulation is [-127, 127] * ([-128, 127] -
-                // [-128, 127]), which is [-32512, 32512]. log2(32512)
-                // = 14.98, which means we can accumulate at least 2^16
-                // multiplications without overflow. The accumulator is
-                // applied to a filter so the accumulation logic will hold as
-                // long as the filter size (filter_y * filter_x * in_channel)
-                // does not exceed 2^16, which is the case in all the models
-                // we have seen so far.
-                // TODO(b/174275578): Add a check to make sure the
-                // accumulator depth is smaller than 2^16.
-                acc += filter_val * (input_val + input_offset);
-              }
+  // initialize results
+  for (int i = 0; i < num_patch; i++) {
+    for (int j = 0; j < num_kernel; j++) {
+      results[i][j] = 0;
+    }
+  }
+
+  //  input image
+  int p = 0;
+  for (int out_y = 0; out_y < output_height; ++out_y) {
+    const int in_y_origin = (out_y * stride_height) - pad_height;
+    for (int out_x = 0; out_x < output_width; ++out_x) {
+      const int in_x_origin = (out_x * stride_width) - pad_width;
+      // for one patch
+      int col = 0;
+      for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
+        const int in_y = in_y_origin + dilation_height_factor * filter_y;
+        for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+          const int in_x = in_x_origin + dilation_width_factor * filter_x;
+          for (int in_channel = 0; in_channel < filter_input_depth;
+               ++in_channel) {
+            if ((in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
+                (in_y < input_height) && (in_channel < input_depth)) {
+              im2col[p][col++] =
+                  input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
+            } else {
+              im2col[p][col++] = -input_offset;
             }
           }
-
-          if (bias_data) {
-            acc += bias_data[out_channel];
-          }
-          acc = MultiplyByQuantizedMultiplier(
-              acc, output_multiplier[out_channel], output_shift[out_channel]);
-          acc += output_offset;
-          acc = std::max(acc, output_activation_min);
-          acc = std::min(acc, output_activation_max);
-          output_data[Offset(output_shape, batch, out_y, out_x, out_channel)] =
-              static_cast<int8_t>(acc);
         }
       }
+      p++;
+    }
+  }
+
+  // kernels
+  for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
+    int col = 0;
+    for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
+      for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+        for (int in_channel = 0; in_channel < filter_input_depth;
+             ++in_channel) {
+          kernels[out_channel][col++] = filter_data[Offset(
+              filter_shape, out_channel, filter_y, filter_x, in_channel)];
+        }
+      }
+    }
+  }
+
+  // send input_offset
+  cfu_op0(5, input_offset, 0);
+  for (int np_block = 0; np_block < num_patch; np_block += tile_size) {
+    int real_m = std::min(tile_size, num_patch - np_block);
+    for (int nk_block = 0; nk_block < num_kernel; nk_block += tile_size) {
+      int real_n = std::min(tile_size, num_kernel - nk_block);
+      for (int ks_block = 0; ks_block < kernel_size; ks_block += tile_size) {
+        int real_k = std::min(tile_size, kernel_size - ks_block);
+
+        // send A buffer (im2col)
+        int index = 0;
+        for (int i = np_block; i < (np_block + real_m); i += 4) {
+          for (int k = ks_block; k < (ks_block + real_k); k++) {
+            int32_t a_val = 0;
+            for (int ii = 0; ii < 4; ii++) {
+              a_val <<= 8;
+              if (i + ii < num_patch) {
+                a_val |= (uint8_t)im2col[i + ii][k];
+              }
+            }
+            // send a_val to A buffer
+            cfu_op0(1, a_val, index++);
+          }
+        }
+
+        // send B buffer (kernels)
+        index = 0;
+        for (int j = nk_block; j < (nk_block + real_n); j += 4) {
+          for (int k = ks_block; k < (ks_block + real_k); k++) {
+            int32_t b_val = 0;
+            for (int jj = 0; jj < 4; jj++) {
+              b_val <<= 8;
+              if (j + jj < num_kernel) {
+                b_val |= (uint8_t)kernels[j + jj][k];
+              }
+            }
+            // send b_val to B buffer
+            cfu_op0(2, b_val, index++);
+          }
+        }
+        cfu_op0(3, ((real_m << 8) | real_k), real_n);
+
+        // receive C buffer
+        index = 0;
+        for (int j = nk_block; j < (nk_block + real_n); j += 4) {
+          for (int i = np_block; i < (np_block + real_m); i++) {
+            for (int jj = 0; jj < 4; jj++) {
+              if (j + jj < num_kernel) {
+                results[i][j + jj] += cfu_op0(4, index, jj);
+              } else
+                break;
+            }
+            index++;
+          }
+        }
+      }
+    }
+  }
+
+  int patch_index = 0;
+  for (int out_y = 0; out_y < output_height; ++out_y) {
+    for (int out_x = 0; out_x < output_width; ++out_x) {
+      for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
+        int32_t acc = results[patch_index][out_channel];
+
+        if (bias_data) {
+          acc += bias_data[out_channel];
+        }
+
+        // Quantization
+        acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[out_channel],
+                                            output_shift[out_channel]);
+        acc += output_offset;
+        acc = std::max(acc, output_activation_min);
+        acc = std::min(acc, output_activation_max);
+
+        output_data[Offset(output_shape, 0, out_y, out_x, out_channel)] =
+            static_cast<int8_t>(acc);
+      }
+      patch_index++;
     }
   }
 }
