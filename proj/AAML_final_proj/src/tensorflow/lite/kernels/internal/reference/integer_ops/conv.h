@@ -40,7 +40,7 @@ inline void ConvPerChannel(
     const int32_t* bias_data, const RuntimeShape& output_shape,
     int8_t* output_data) {
   // Get parameters.
-  print_conv_params(params, input_shape, filter_shape, output_shape);
+  // print_conv_params(params, input_shape, filter_shape, output_shape);
 
   const int32_t input_offset = params.input_offset;  // r = s(q - Z)
   const int stride_width = params.stride_width;
@@ -140,32 +140,15 @@ inline void ConvPerChannel(
 
   // send input_offset
   cfu_op0(5, input_offset, 0);
-  for (int ks_block = 0; ks_block < kernel_size; ks_block += tile_size) {
-    int real_k = std::min(tile_size, kernel_size - ks_block);
+  for (int np_block = 0; np_block < num_patch; np_block += tile_size) {
+    int real_m = std::min(tile_size, num_patch - np_block);
     for (int nk_block = 0; nk_block < num_kernel; nk_block += tile_size) {
       int real_n = std::min(tile_size, num_kernel - nk_block);
-
-      // send B buffer (kernels)
-      int index = 0;
-      for (int j = nk_block; j < (nk_block + real_n); j += 4) {
-        for (int k = ks_block; k < (ks_block + real_k); k++) {
-          int32_t b_val = 0;
-          for (int jj = 0; jj < 4; jj++) {
-            b_val <<= 8;
-            if (j + jj < num_kernel) {
-              b_val |= (uint8_t)kernels[j + jj][k];
-            }
-          }
-          // send b_val to B buffer
-          cfu_op0(2, b_val, index++);
-        }
-      }
-
-      for (int np_block = 0; np_block < num_patch; np_block += tile_size) {
-        int real_m = std::min(tile_size, num_patch - np_block);
+      for (int ks_block = 0; ks_block < kernel_size; ks_block += tile_size) {
+        int real_k = std::min(tile_size, kernel_size - ks_block);
 
         // send A buffer (im2col)
-        index = 0;
+        int index = 0;
         for (int i = np_block; i < (np_block + real_m); i += 4) {
           for (int k = ks_block; k < (ks_block + real_k); k++) {
             int32_t a_val = 0;
@@ -177,6 +160,22 @@ inline void ConvPerChannel(
             }
             // send a_val to A buffer
             cfu_op0(1, a_val, index++);
+          }
+        }
+
+        // send B buffer (kernels)
+        index = 0;
+        for (int j = nk_block; j < (nk_block + real_n); j += 4) {
+          for (int k = ks_block; k < (ks_block + real_k); k++) {
+            int32_t b_val = 0;
+            for (int jj = 0; jj < 4; jj++) {
+              b_val <<= 8;
+              if (j + jj < num_kernel) {
+                b_val |= (uint8_t)kernels[j + jj][k];
+              }
+            }
+            // send b_val to B buffer
+            cfu_op0(2, b_val, index++);
           }
         }
 
