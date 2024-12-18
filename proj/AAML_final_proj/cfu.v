@@ -27,7 +27,7 @@ wire  [11:0]    C_index;
 wire  [127:0]   C_data_out;
 
 reg [11:0] a_index, b_index, c_index;
-reg [8:0] input_offset;
+reg [8:0] input_offset, filter_offset;
 
 assign A_index = a_index;
 assign B_index = b_index;
@@ -50,6 +50,23 @@ PATTERN pattern(
   .C_data_out(C_data_out)
 );
 
+// SIMD
+reg  [15:0] InputOffset;
+reg  [8:0] FilterOffset;
+reg signed [31:0] acc;
+wire signed [31:0] sum_prods;
+wire signed [15:0] prod_0, prod_1, prod_2, prod_3;
+assign prod_0 =  ($signed(cmd_payload_inputs_0[7 : 0]) + $signed(input_offset))
+                  * ($signed(cmd_payload_inputs_1[7 : 0]) + $signed(filter_offset));
+assign prod_1 =  ($signed(cmd_payload_inputs_0[15: 8]) + $signed(input_offset))
+                  * ($signed(cmd_payload_inputs_1[15: 8]) + $signed(filter_offset));
+assign prod_2 =  ($signed(cmd_payload_inputs_0[23:16]) + $signed(input_offset))
+                  * ($signed(cmd_payload_inputs_1[23:16]) + $signed(filter_offset));
+assign prod_3 =  ($signed(cmd_payload_inputs_0[31:24]) + $signed(input_offset))
+                  * ($signed(cmd_payload_inputs_1[31:24]) + $signed(filter_offset));
+
+assign sum_prods = prod_0 + prod_1 + prod_2 + prod_3;
+
 always @ (posedge clk) begin
   if(reset) begin
     rsp_payload_outputs_0 <= 32'd0;
@@ -57,6 +74,7 @@ always @ (posedge clk) begin
     cmd_ready <= 1'b1;
     func <= 0;
     state <= 0;
+    acc <= 32'd0;
   end else if(rsp_valid) begin
     rsp_valid <= ~rsp_ready;
     cmd_ready <= rsp_ready;
@@ -97,6 +115,9 @@ always @ (posedge clk) begin
           state <= 1;
         end
         5: begin
+          rsp_payload_outputs_0 <= 0;
+          // InputOffset <= cmd_payload_inputs_0;
+          filter_offset <= cmd_payload_inputs_1;
           input_offset <= cmd_payload_inputs_0;
           cmd_ready <= 1'b0;
           rsp_valid <= 1'b1;
@@ -106,6 +127,16 @@ always @ (posedge clk) begin
           rsp_valid <= 1'b1;
           cmd_ready <= 1'b0;
         end
+        7: begin
+          rsp_payload_outputs_0 <= rsp_payload_outputs_0 + sum_prods;
+          rsp_valid <= 1'b1;
+          cmd_ready <= 1'b0;
+        end
+        // 8: begin
+        //   rsp_payload_outputs_0 <= acc + cmd_payload_inputs_1;
+        //   rsp_valid <= 1'b1;
+        //   cmd_ready <= 1'b0;
+        // end
         default: begin // for conv, fully_connected, pooling, softmax
           // rsp_payload_outputs_0 <= 32'd0;
           rsp_valid <= 1'b1;

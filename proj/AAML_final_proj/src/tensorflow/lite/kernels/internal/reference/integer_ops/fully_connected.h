@@ -15,7 +15,10 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_FULLY_CONNECTED_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_FULLY_CONNECTED_H_
 
+#include <cfu.h>
+
 #include <algorithm>
+#include <cstdio>
 
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
@@ -134,13 +137,23 @@ inline void FullyConnected(
   const int output_depth = output_shape.Dims(output_dim_count - 1);
   TFLITE_DCHECK_LE(output_depth, filter_shape.Dims(filter_dim_count - 2));
   const int accum_depth = filter_shape.Dims(filter_dim_count - 1);
+
+  // cfu_op0(0,input_offset,filter_offset);
+
   for (int b = 0; b < batches; ++b) {
     for (int out_c = 0; out_c < output_depth; ++out_c) {
-      int32_t acc = 0;
-      for (int d = 0; d < accum_depth; ++d) {
-        int32_t input_val = input_data[b * accum_depth + d];
-        int32_t filter_val = filter_data[out_c * accum_depth + d];
-        acc += (filter_val + filter_offset) * (input_val + input_offset);
+      int32_t acc = cfu_op0(/* funct7= */ 5, input_offset, filter_offset);
+
+      for (int d = 0; d < accum_depth; d += 4) {
+        // int32_t input_val = input_data[b * accum_depth + d];
+        // int32_t filter_val = filter_data[out_c * accum_depth + d];
+        uint32_t input_val = *((uint32_t*)(input_data + b * accum_depth + d));
+
+        uint32_t filter_val =
+            *((uint32_t*)(filter_data + out_c * accum_depth + d));
+
+        acc = cfu_op0(/* funct7= */ 7, /* in0= */ input_val,
+                      /* in1= */ filter_val);
       }
       if (bias_data) {
         acc += bias_data[out_c];
